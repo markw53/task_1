@@ -14,6 +14,10 @@ import structlog
 
 logger = structlog.get_logger()
 
+# Maps actions to the worker class that can handle them
+CPU_ACTIONS = {"factorial", "fibonacci", "prime_check"}
+IO_ACTIONS = {"echo", "transform", "aggregate"}
+
 
 class Scheduler:
     def __init__(self, config: QueueConfig):
@@ -41,8 +45,32 @@ class Scheduler:
         logger.info("job_submitted", job_id=job.id, name=job.name, priority=job.priority)
         return job.id
 
+    def _get_compatible_worker(self, job: Job) -> Optional[BaseWorker]:
+        """Find an available worker that can handle this job's action type."""
+        action = job.payload.get("action", "")
+
+        if action in CPU_ACTIONS:
+            target_type = CpuWorker
+        elif action in IO_ACTIONS:
+            target_type = IoWorker
+        else:
+            # Unknown action — try any available worker
+            target_type = BaseWorker
+
+        for worker in self._workers:
+            if not worker.is_busy and isinstance(worker, target_type):
+                return worker
+
+        # Fallback: if no compatible worker is free, return None
+        return None
+
     async def process_next(self) -> Optional[JobResult]:
-        worker = self._get_available_worker()
+        # Peek first to check if we have a compatible worker before popping
+        peeked = self.queue.peek()
+        if peeked is None:
+            return None
+
+        worker = self._get_compatible_worker(peeked)
         if worker is None:
             return None
 
@@ -95,9 +123,3 @@ class Scheduler:
             "strategy": self._strategy.name,
             "workers": [w.stats for w in self._workers],
         }
-
-    def _get_available_worker(self) -> Optional[BaseWorker]:
-        for worker in self._workers:
-            if not worker.is_busy:
-                return worker
-        return None
